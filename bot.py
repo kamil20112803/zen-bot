@@ -77,8 +77,6 @@ HISTORICAL_EVENTS = {
 
 COUNTRIES = {
     "zen": {"name": "🌍 Zen Community", "people": [("admin", "Администрация Zen Community"), ("rt6y9n", "@rt6y9n — Глава сообщества")]},
-    "north": {"name": "🏔️ Северная Держава", "people": [("leader_north", "Глава Северной Державы"), ("diplomat_north", "Дипломат Северной Державы")]},
-    "south": {"name": "🌊 Южная Федерация", "people": [("leader_south", "Президент Южной Федерации")]},
 }
 
 RIGHT_KEYS = ["can_edit_users", "can_view_stats", "can_publish_news", "can_read_mail", "can_reply_mail", "can_manage_admins", "can_send_codes"]
@@ -220,14 +218,36 @@ def comm_menu_kb():
 def profile_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📝 Заполнить / изменить данные", callback_data="prof:fill")], [InlineKeyboardButton(text="🔐 Ввести верификационный код", callback_data="prof:verify")], [InlineKeyboardButton(text="👤 Мой профиль", callback_data="prof:view")]])
 
-def countries_kb(prefix: str):
-    rows = [[InlineKeyboardButton(text=v["name"], callback_data=f"{prefix}:{k}")] for k, v in COUNTRIES.items()]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+async def countries_kb():
+    async with db_pool.acquire() as conn:
+        # Берем уникальные страны из базы + всегда добавляем Администрацию
+        rows = await conn.fetch("SELECT DISTINCT game_country FROM users WHERE verified = 1 AND game_country IS NOT NULL")
+    
+    buttons = [[InlineKeyboardButton(text="🌍 Администрация", callback_data="mailc:admins")]]
+    
+    for r in rows:
+        country_name = r['game_country']
+        if country_name.strip().lower() not in ["администрация", "zen community", "—"]:
+            # Создаем короткий ID для кнопки (убираем пробелы)
+            c_id = country_name.replace(" ", "_")
+            buttons.append([InlineKeyboardButton(text=f"🏛 {country_name}", callback_data=f"mailc:{c_id}")])
+            
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="comm:back")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def people_kb(country_key: str):
-    rows = [[InlineKeyboardButton(text=label, callback_data=f"mailto:{country_key}:{rid}")] for rid, label in COUNTRIES[country_key]["people"]]
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="comm:mail")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+async def people_kb(country_name: str):
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT game_nick, game_position FROM users WHERE verified = 1 AND game_country = $1", country_name)
+    
+    buttons = []
+    for r in rows:
+        # В callback_data передаем страну и ник
+        nick = r['game_nick']
+        pos = r['game_position']
+        buttons.append([InlineKeyboardButton(text=f"{pos}: {nick}", callback_data=f"mailto:{country_name}:{nick}")])
+        
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="comm:mail")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def admin_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -419,29 +439,51 @@ async def prof_verify_code(message: Message, state: FSMContext):
 async def comm_mail(call: CallbackQuery):
     u = await get_user(call.from_user.id)
     if not (u and u["verified"]):
-        await call.message.edit_text("✉️ <b>Дипломатическая почта</b>\n\n⚠️ Ты не верифицирован. Пока можешь писать только администрации.\n\nНажми «Написать администрации».", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✉️ Написать администрации", callback_data="mailto:zen:admin")], [InlineKeyboardButton(text="⬅️ Назад", callback_data="comm:back")]]))
+        await call.message.edit_text(
+            "✉️ <b>Дипломатическая почта</b>\n\n"
+            "⚠️ Ты не верифицирован. Пока можешь писать только администрации.\n\n"
+            "Нажми «Написать администрации».",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✉️ Написать администрации", callback_data="mailto:admins:admin")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="comm:back")]
+            ])
+        )
         return await call.answer()
-    await call.message.edit_text("✉️ <b>Дипломатическая почта</b>\n\nВыбери страну:", reply_markup=countries_kb("mailc"))
-    await call.answer()
-
-@dp.callback_query(F.data == "comm:back")
-async def comm_back(call: CallbackQuery):
-    await call.message.edit_text("🤝 <b>Раздел «Коммуникация»</b>\nВыбери действие:", reply_markup=comm_menu_kb())
+    
+    await call.message.edit_text(
+        "✉️ <b>Дипломатическая почта</b>\n\nВыбери страну (список формируется из верифицированных игроков):", 
+        reply_markup=await countries_kb()
+    )
     await call.answer()
 
 @dp.callback_query(F.data.startswith("mailc:"))
 async def comm_mail_country(call: CallbackQuery):
-    country_key = call.data.split(":", 1)[1]
-    if country_key not in COUNTRIES: return await call.answer("Не найдено", show_alert=True)
-    await call.message.edit_text(f"✉️ <b>{COUNTRIES[country_key]['name']}</b>\n\nКому направить сообщение?", reply_markup=people_kb(country_key))
+    country_id = call.data.split(":", 1)[1]
+    
+    if country_id == "admins":
+        await call.message.edit_text(
+            "✉️ <b>Администрация</b>\n\nНажми, чтобы написать администрации:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="👑 Написать администрации", callback_data="mailto:Администрация:admin")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="comm:mail")]
+            ])
+        )
+    else:
+        country_name = country_id.replace("_", " ")
+        await call.message.edit_text(
+            f"✉️ <b>{country_name}</b>\n\nВыбери, кому направить сообщение:", 
+            reply_markup=await people_kb(country_name)
+        )
     await call.answer()
 
 @dp.callback_query(F.data.startswith("mailto:"))
 async def comm_mail_recipient(call: CallbackQuery, state: FSMContext):
-    _, country_key, recipient = call.data.split(":", 2)
-    await state.update_data(mail_country=country_key, mail_recipient=recipient)
+    _, country_name, recipient = call.data.split(":", 2)
+    await state.update_data(mail_country=country_name, mail_recipient=recipient)
     await state.set_state(MailForm.text)
-    await call.message.edit_text("✍️ Введи текст дипломатического сообщения:")
+    await call.message.edit_text(
+        f"✍️ Введи текст сообщения для <b>{country_name}</b> (получатель: <code>{recipient}</code>):"
+    )
     await call.answer()
 
 @dp.message(MailForm.text)
