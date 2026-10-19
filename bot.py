@@ -13,6 +13,8 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton,
 )
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 
 # ============================================================
 #                     НАСТРОЙКИ
@@ -721,7 +723,7 @@ async def main():
     if not BOT_TOKEN or BOT_TOKEN == "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА_ЕСЛИ_ТЕСТИРУЕШЬ_ЛОКАЛЬНО":
         raise RuntimeError("BOT_TOKEN не задан в Environment Variables на Render!")
     await init_db()
-    bot = Bot(BOT_TOKEN)
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     logging.info("Bot started successfully!")
     await dp.start_polling(bot)
 
