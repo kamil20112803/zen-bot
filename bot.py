@@ -1,4 +1,3 @@
-
 import asyncio
 import os
 import logging
@@ -498,4 +497,234 @@ async def adm_ticket_send_code(message: Message, state: FSMContext):
     if not (code.isdigit() and len(code) == 4): return await message.answer("Код должен быть из 4 цифр. Попробуй ещё раз:")
     await state.update_data(ticket_code=code)
     await state.set_state(AdminForms.ticket_send_nick)
-    await message.answer("Теперь подтверди ник игрока на сервере
+    await message.answer("Теперь подтверди ник игрока на сервере, которому отправлен код:")
+
+@dp.message(AdminForms.ticket_send_nick)
+async def adm_ticket_send_nick(message: Message, state: FSMContext):
+    nick = message.text.strip()
+    data = await state.get_data()
+    ticket_id, code = data["ticket_id"], data["ticket_code"]
+    async with db_pool.acquire() as conn:
+        ticket = await conn.fetchrow("SELECT * FROM tickets WHERE id=$1", ticket_id)
+        if not ticket: return await message.answer("Тикет не найден.")
+        await conn.execute("UPDATE tickets SET status='sent', code_sent=$1, sent_by=$2, sent_at=$3 WHERE id=$4", code, message.from_user.id, datetime.now().strftime("%d.%m.%Y %H:%M"), ticket_id)
+        await conn.execute("UPDATE users SET verify_code=$1 WHERE user_id=$2", code, ticket['user_id'])
+    try: await message.bot.send_message(ticket['user_id'], f"📬 <b>Дипломатическая почта</b>\n\nДля профиля <code>{nick}</code> отправлен верификационный код.\nПроверь серверную почту в игре и введи код в разделе «Дипломатический профиль» → «Ввести код».")
+    except Exception: pass
+    await state.clear()
+    await message.answer(f"✅ Код отправлен по тикету #{ticket_id} (ник {nick}).\nВ БД записано: отправитель <code>{message.from_user.id}</code>, код <code>{code}</code>.", reply_markup=main_menu_kb())
+
+# СТАТИСТИКА
+@dp.callback_query(F.data == "adm:code_stats")
+async def adm_code_stats(call: CallbackQuery):
+    if not await has_right(call.from_user.id, "can_manage_admins"): return await call.answer("Нет прав", show_alert=True)
+    async with db_pool.acquire() as conn:
+        by_admin = await conn.fetch("SELECT sent_by, COUNT(*) AS cnt FROM tickets WHERE status='sent' AND sent_by IS NOT NULL GROUP BY sent_by")
+        by_status = await conn.fetch("SELECT status, COUNT(*) AS cnt FROM tickets GROUP BY status")
+        code_admins = await conn.fetch("SELECT user_id FROM admins WHERE can_send_codes=1")
+    text = "📈 <b>Статистика по кодам</b>\n\n<b>Всего тикетов по статусам:</b>\n"
+    for s in by_status:
+        emoji = {"open": "🕓", "sent": "✅", "rejected": "❌"}.get(s["status"], "•")
+        text += f"{emoji} {s['status']}: {s['cnt']}\n"
+    if not by_status: text += "— нет данных\n"
+    text += "\n<b>Кто сколько кодов отправил:</b>\n"
+    if by_admin:
+        for r in by_admin: text += f"• <code>{r['sent_by']}</code> — {r['cnt']} шт.\n"
+    else: text += "— пока никто\n"
+    text += "\n<b>Кто имеет право отправлять коды:</b>\n"
+    if code_admins:
+        for r in code_admins: text += f"• <code>{r['user_id']}</code>\n"
+    else: text += "— никого\n"
+    await call.message.edit_text(text, reply_markup=back_to_admin_kb())
+    await call.answer()
+
+# ОСТАЛЬНЫЕ АДМИН-ФУНКЦИИ
+@dp.callback_query(F.data == "adm:edit_user")
+async def adm_edit_user(call: CallbackQuery, state: FSMContext):
+    if not await has_right(call.from_user.id, "can_edit_users"): return await call.answer("Нет прав", show_alert=True)
+    await state.set_state(AdminForms.edit_user_id)
+    await call.message.edit_text("Введи <b>user_id</b> пользователя, чьи данные меняем:")
+    await call.answer()
+
+@dp.message(AdminForms.edit_user_id)
+async def adm_edit_user_id(message: Message, state: FSMContext):
+    if not message.text.isdigit(): return await message.answer("Нужен числовой user_id.")
+    uid = int(message.text)
+    u = await get_user(uid)
+    if not u: return await message.answer("Пользователь не найден.")
+    await state.update_data(edit_uid=uid)
+    await state.set_state(AdminForms.edit_user_nick)
+    await message.answer(f"Текущий ник: <b>{u['game_nick'] or '—'}</b>\nВведи новый ник (или отправь <code>-</code>, чтобы оставить):")
+
+@dp.message(AdminForms.edit_user_nick)
+async def adm_edit_user_nick(message: Message, state: FSMContext):
+    if message.text.strip() != "-": await state.update_data(new_nick=message.text.strip())
+    await state.set_state(AdminForms.edit_user_country)
+    await message.answer("Введи новую страну (или <code>-</code>, чтобы оставить):")
+
+@dp.message(AdminForms.edit_user_country)
+async def adm_edit_user_country(message: Message, state: FSMContext):
+    data = await state.get_data()
+    async with db_pool.acquire() as conn:
+        if message.text.strip() != "-": await conn.execute("UPDATE users SET game_country=$1 WHERE user_id=$2", message.text.strip(), data["edit_uid"])
+        if "new_nick" in data: await conn.execute("UPDATE users SET game_nick=$1 WHERE user_id=$2", data["new_nick"], data["edit_uid"])
+    await state.clear()
+    await message.answer("✅ Данные пользователя обновлены.", reply_markup=main_menu_kb())
+
+@dp.callback_query(F.data == "adm:stats_user")
+async def adm_stats_user(call: CallbackQuery, state: FSMContext):
+    if not await has_right(call.from_user.id, "can_view_stats"): return await call.answer("Нет прав", show_alert=True)
+    await state.set_state(AdminForms.stats_user_id)
+    await call.message.edit_text("Введи <b>user_id</b> для просмотра статистики:")
+    await call.answer()
+
+@dp.message(AdminForms.stats_user_id)
+async def adm_stats_result(message: Message, state: FSMContext):
+    if not message.text.isdigit(): return await message.answer("Нужен числовой user_id.")
+    uid = int(message.text)
+    u = await get_user(uid)
+    if not u: return await message.answer("Пользователь не найден.")
+    async with db_pool.acquire() as conn:
+        sent = await conn.fetchval("SELECT COUNT(*) FROM mail WHERE from_user_id=$1", uid)
+        answered = await conn.fetchval("SELECT COUNT(*) FROM mail WHERE answered_by=$1", uid)
+    await state.clear()
+    await message.answer(f"📊 <b>Статистика пользователя {uid}</b>\n\nUsername: @{u['username'] or '—'}\nНик: {u['game_nick'] or '—'}\nСтрана: {u['game_country'] or '—'}\nДолжность: {u['game_position'] or '—'}\nВерифицирован: {'да' if u['verified'] else 'нет'}\nОтправлено писем: {sent}\nОтвечено писем: {answered}")
+
+@dp.callback_query(F.data == "adm:news")
+async def adm_news(call: CallbackQuery, state: FSMContext):
+    if not await has_right(call.from_user.id, "can_publish_news"): return await call.answer("Нет прав", show_alert=True)
+    await state.set_state(AdminForms.news_text)
+    await call.message.edit_text("Введи текст новости для автоматической рассылки всем пользователям:")
+    await call.answer()
+
+@dp.message(AdminForms.news_text)
+async def adm_news_send(message: Message, state: FSMContext):
+    text = message.text.strip()
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO news (text, created_at) VALUES ($1, $2)", text, datetime.now().strftime("%d.%m.%Y %H:%M"))
+        users = await conn.fetch("SELECT user_id FROM users")
+    await state.clear()
+    sent, failed = 0, 0
+    for r in users:
+        try: await message.bot.send_message(r["user_id"], f"📰 <b>Новость</b>\n\n{text}"); sent += 1
+        except Exception: failed += 1
+    await message.answer(f"✅ Новость опубликована.\nДоставлено: {sent}, ошибок: {failed}.")
+
+@dp.callback_query(F.data == "adm:mail")
+async def adm_mail(call: CallbackQuery):
+    if not await has_right(call.from_user.id, "can_read_mail"): return await call.answer("Нет прав", show_alert=True)
+    await call.message.edit_text("📬 <b>Дипломатическая почта</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Входящие", callback_data="admmail:list")], [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm:back")]]))
+    await call.answer()
+
+@dp.callback_query(F.data == "admmail:list")
+async def adm_mail_list(call: CallbackQuery):
+    if not await has_right(call.from_user.id, "can_read_mail"): return await call.answer("Нет прав", show_alert=True)
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM mail ORDER BY id DESC LIMIT 20")
+    if not rows:
+        await call.message.edit_text("📭 Входящих нет.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="adm:mail")]]))
+        return await call.answer()
+    text = "📥 <b>Последние сообщения:</b>\n\n"
+    buttons = []
+    for r in rows:
+        status = "✅" if r["answer"] else "🕓"
+        text += f"{status} <b>#{r['id']}</b> от {r['from_country']} → {r['to_country']}/{r['to_recipient']}\n<i>{r['created_at']}</i>\n{r['text'][:120]}...\n\n"
+        buttons.append([InlineKeyboardButton(text=f"Ответить на #{r['id']}", callback_data=f"admmail:reply:{r['id']}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm:mail")])
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("admmail:reply:"))
+async def adm_mail_reply(call: CallbackQuery, state: FSMContext):
+    if not await has_right(call.from_user.id, "can_reply_mail"): return await call.answer("Нет прав", show_alert=True)
+    mail_id = int(call.data.split(":")[-1])
+    await state.update_data(reply_mail_id=mail_id)
+    await state.set_state(AdminForms.reply_mail_text)
+    await call.message.edit_text(f"✍️ Введи ответ на сообщение #{mail_id}:")
+    await call.answer()
+
+@dp.message(AdminForms.reply_mail_text)
+async def adm_mail_reply_send(message: Message, state: FSMContext):
+    data = await state.get_data()
+    mail_id, text = data["reply_mail_id"], message.text.strip()
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM mail WHERE id=$1", mail_id)
+        if not row: return await message.answer("Сообщение не найдено.")
+        await conn.execute("UPDATE mail SET answer=$1, answered_by=$2 WHERE id=$3", text, message.from_user.id, mail_id)
+    try: await message.bot.send_message(row["from_user_id"], f"📬 <b>Ответ по дипломатической почте</b>\nНа твоё сообщение #{mail_id}:\n\n{text}")
+    except Exception: pass
+    await state.clear()
+    await message.answer("✅ Ответ отправлен.")
+
+@dp.callback_query(F.data == "adm:admins")
+async def adm_admins(call: CallbackQuery):
+    if not await has_right(call.from_user.id, "can_manage_admins"): return await call.answer("Нет прав", show_alert=True)
+    await call.message.edit_text("👥 <b>Управление администраторами</b>", reply_markup=admin_manage_kb())
+    await call.answer()
+
+@dp.callback_query(F.data == "admadm:list")
+async def adm_admins_list(call: CallbackQuery):
+    if not await has_right(call.from_user.id, "can_manage_admins"): return await call.answer("Нет прав", show_alert=True)
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM admins")
+    if not rows:
+        await call.message.edit_text("Список пуст.", reply_markup=admin_manage_kb())
+        return await call.answer()
+    text = "📋 <b>Администраторы:</b>\n\n"
+    buttons = []
+    for r in rows:
+        granted = [RIGHT_LABELS[k] for k in RIGHT_KEYS if r[k]]
+        text += f"• <code>{r['user_id']}</code>: {', '.join(granted) or '—'}\n"
+        buttons.append([InlineKeyboardButton(text=f"🗑 Снять права с {r['user_id']}", callback_data=f"admadm:del:{r['user_id']}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm:admins")])
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("admadm:del:"))
+async def adm_admins_del(call: CallbackQuery):
+    if not await has_right(call.from_user.id, "can_manage_admins"): return await call.answer("Нет прав", show_alert=True)
+    uid = int(call.data.split(":")[-1])
+    await remove_admin(uid)
+    await call.answer("Права сняты.", show_alert=True)
+    await call.message.edit_text("👥 <b>Управление администраторами</b>", reply_markup=admin_manage_kb())
+
+@dp.callback_query(F.data == "admadm:add")
+async def adm_admins_add(call: CallbackQuery, state: FSMContext):
+    if not await has_right(call.from_user.id, "can_manage_admins"): return await call.answer("Нет прав", show_alert=True)
+    await state.set_state(AdminForms.add_admin_id)
+    await call.message.edit_text("Введи <b>user_id</b> нового администратора\n(его можно узнать, попросив пользователя нажать /start и посмотрев в БД).")
+    await call.answer()
+
+@dp.message(AdminForms.add_admin_id)
+async def adm_admins_add_id(message: Message, state: FSMContext):
+    if not message.text.isdigit(): return await message.answer("Нужен числовой user_id.")
+    await state.update_data(new_admin_id=int(message.text))
+    await state.set_state(AdminForms.add_admin_rights)
+    await message.answer("Введи права через запятую:\n\n<code>edit</code> — менять ник/страну\n<code>stats</code> — смотреть статистику\n<code>news</code> — публиковать новости\n<code>read</code> — читать почту\n<code>reply</code> — отвечать на почту\n<code>admins</code> — управлять админами\n<code>codes</code> — отправлять коды\n\nПример: <code>news,stats</code>")
+
+@dp.message(AdminForms.add_admin_rights)
+async def adm_admins_add_rights(message: Message, state: FSMContext):
+    chosen = [p.strip().lower() for p in message.text.split(",") if p.strip()]
+    rights = {v: 0 for v in RIGHT_KEYS}
+    for c in chosen:
+        if c in RIGHT_SHORTCUTS: rights[RIGHT_SHORTCUTS[c]] = 1
+    data = await state.get_data()
+    await add_admin(data["new_admin_id"], rights)
+    await state.clear()
+    await message.answer(f"✅ Пользователь <code>{data['new_admin_id']}</code> назначен администратором.", reply_markup=main_menu_kb())
+
+# ============================================================
+#                     ЗАПУСК
+# ============================================================
+
+async def main():
+    if not BOT_TOKEN or BOT_TOKEN == "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА_ЕСЛИ_ТЕСТИРУЕШЬ_ЛОКАЛЬНО":
+        raise RuntimeError("BOT_TOKEN не задан в Environment Variables на Render!")
+    await init_db()
+    bot = Bot(BOT_TOKEN)
+    dp.include_router(dp)
+    logging.info("Bot started successfully!")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
