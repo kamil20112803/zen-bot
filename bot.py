@@ -722,7 +722,6 @@ async def main():
         raise RuntimeError("BOT_TOKEN не задан в Environment Variables на Render!")
     await init_db()
     bot = Bot(BOT_TOKEN)
-    dp.include_router(dp)
     logging.info("Bot started successfully!")
     await dp.start_polling(bot)
 
