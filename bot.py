@@ -258,6 +258,7 @@ def admin_menu_kb():
         [InlineKeyboardButton(text="📬 Дипломатическая почта", callback_data="adm:mail")],
         [InlineKeyboardButton(text="📈 Статистика по кодам", callback_data="adm:code_stats")],
         [InlineKeyboardButton(text="👥 Управление администраторами", callback_data="adm:admins")],
+        [InlineKeyboardButton(text="🗄 Все пользователи в БД", callback_data="adm:all_users")],
     ])
 
 def admin_manage_kb():
@@ -757,6 +758,29 @@ async def adm_admins_add_rights(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ Пользователь <code>{data['new_admin_id']}</code> назначен администратором.", reply_markup=main_menu_kb())
 
+@dp.callback_query(F.data == "adm:all_users")
+async def adm_all_users(call: CallbackQuery):
+    if not await has_right(call.from_user.id, "can_view_stats"):
+        return await call.answer("Нет прав", show_alert=True)
+    
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id, username, game_nick, game_country, verified FROM users ORDER BY user_id")
+    
+    if not rows:
+        return await call.message.edit_text("База пуста.", reply_markup=back_to_admin_kb())
+        
+    text = "🗄 <b>Пользователи в БД:</b>\n\n"
+    for r in rows:
+        status = "✅" if r['verified'] else "❌"
+        text += f"{status} <code>{r['user_id']}</code> | @{r['username'] or '—'} | {r['game_nick'] or '—'} ({r['game_country'] or '—'})\n"
+    
+    # Разбиваем сообщение, если оно слишком длинное (Telegram не пропустит больше 4096 символов)
+    if len(text) > 4000:
+        text = text[:4000] + "\n\n<i>...список обрезан...</i>"
+        
+    await call.message.edit_text(text, reply_markup=back_to_admin_kb())
+    await call.answer()
+    
 # ============================================================
 #                     ЗАПУСК
 # ============================================================
