@@ -15,6 +15,8 @@ from aiogram.types import (
 )
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ============================================================
 #                     НАСТРОЙКИ
@@ -785,7 +787,19 @@ async def adm_all_users(call: CallbackQuery):
 #                     ЗАПУСК
 # ============================================================
 
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive")
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), DummyHandler)
+    server.serve_forever()
+
 async def main():
+    threading.Thread(target=run_dummy_server, daemon=True).start()
     if not BOT_TOKEN or BOT_TOKEN == "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА_ЕСЛИ_ТЕСТИРУЕШЬ_ЛОКАЛЬНО":
         raise RuntimeError("BOT_TOKEN не задан в Environment Variables на Render!")
     await init_db()
