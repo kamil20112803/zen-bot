@@ -412,7 +412,7 @@ async def comm_mail_country(call: CallbackQuery):
     if country_id == "admins":
         # Показываем админов по их игровым никам
         async with db_pool.acquire() as conn:
-            rows = await conn.fetch("SELECT user_id, game_nick, username FROM admins LEFT JOIN users ON admins.user_id = users.user_id")
+            rows = await conn.fetch("SELECT admins.user_id, game_nick, username FROM admins LEFT JOIN users ON admins.user_id = users.user_id")
         buttons = []
         for r in rows:
             nick = r['game_nick'] or r['username'] or "Администратор"
