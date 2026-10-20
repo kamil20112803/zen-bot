@@ -742,7 +742,6 @@ async def main():
     threading.Thread(target=run_dummy_server, daemon=True).start()
     await init_db()
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp.include_router(dp)
     logging.info("Bot started successfully!")
     await dp.start_polling(bot)
 
